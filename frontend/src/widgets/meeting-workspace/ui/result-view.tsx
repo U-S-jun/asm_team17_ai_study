@@ -15,7 +15,7 @@ export function ResultView({ result, onReset }: ResultViewProps) {
     <div className="space-y-5">
       <div className="flex flex-col justify-between gap-4 rounded-lg border border-neutral-200 bg-white px-5 py-4 md:flex-row md:items-center">
         <div>
-          <p className="text-xs font-semibold uppercase tracking-[0.12em] text-emerald-700">
+          <p className="text-xs font-semibold uppercase tracking-[0.12em] text-teal-700">
             Result
           </p>
           <h2 className="mt-1 text-xl font-semibold text-neutral-950">
@@ -82,7 +82,7 @@ export function ResultView({ result, onReset }: ResultViewProps) {
 
       <Panel title="최종 초안" eyebrow="Message">
         <div className="flex items-start gap-3">
-          <Wand2 className="mt-1 size-5 shrink-0 text-emerald-700" />
+          <Wand2 className="mt-1 size-5 shrink-0 text-teal-700" />
           <div className="space-y-3">
             <p className="text-base font-semibold text-neutral-950">
               {result.recommendation.summary}

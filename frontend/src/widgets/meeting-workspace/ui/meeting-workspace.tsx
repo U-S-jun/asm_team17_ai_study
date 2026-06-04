@@ -1,13 +1,12 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { AnalysisForm } from "@/features/analyze-meeting/ui/analysis-form";
 import { useAnalyzeMeeting } from "@/features/analyze-meeting/model/use-analyze-meeting";
 import type {
   MeetingAnalysisResponse,
   ParticipantDraft,
 } from "@/shared/model/meeting";
-import { Panel } from "@/shared/ui/panel";
 import { LoadingView } from "./loading-view";
 import { ResultView } from "./result-view";
 
@@ -53,15 +52,6 @@ export function MeetingWorkspace() {
   const [discussionEndedAt, setDiscussionEndedAt] = useState("");
   const [participants, setParticipants] =
     useState<ParticipantDraft[]>(initialParticipants);
-
-  const filledParticipantCount = useMemo(
-    () =>
-      participants.filter(
-        (participant) =>
-          participant.name.trim() && participant.startLocation.trim(),
-      ).length,
-    [participants],
-  );
 
   function handleParticipantChange(
     id: string,
@@ -114,33 +104,28 @@ export function MeetingWorkspace() {
 
   return (
     <main className="min-h-screen bg-neutral-100 text-neutral-950">
-      <div className="mx-auto flex w-full max-w-7xl flex-col gap-6 px-4 py-6 sm:px-6 lg:px-8">
-        <header className="flex flex-col justify-between gap-4 border-b border-neutral-300 pb-5 md:flex-row md:items-end">
+      <header className="bg-slate-900 text-white">
+        <div className="mx-auto flex w-full max-w-7xl items-center gap-3 px-4 py-4 sm:px-6 lg:px-8">
+          <span className="size-10 shrink-0 rounded-full bg-amber-300" aria-hidden />
           <div>
-            <p className="text-sm font-semibold text-emerald-700">
-              니가양보해
-            </p>
-            <h1 className="mt-2 text-3xl font-semibold tracking-normal text-neutral-950 md:text-4xl">
-              약속 후보 분석
-            </h1>
+            <p className="text-lg font-bold tracking-tight">니가양보해</p>
+            <p className="text-xs text-slate-300">약속 시간·장소·메뉴 조율</p>
           </div>
-          <dl className="grid grid-cols-3 gap-3 text-right text-sm md:min-w-80">
-            <div>
-              <dt className="text-neutral-500">파일</dt>
-              <dd className="mt-1 font-semibold">
-                {chatFile ? "선택됨" : "대기"}
-              </dd>
-            </div>
-            <div>
-              <dt className="text-neutral-500">참여자</dt>
-              <dd className="mt-1 font-semibold">{filledParticipantCount}명</dd>
-            </div>
-            <div>
-              <dt className="text-neutral-500">방식</dt>
-              <dd className="mt-1 font-semibold">동기</dd>
-            </div>
-          </dl>
-        </header>
+        </div>
+      </header>
+
+      <div className="mx-auto flex w-full max-w-7xl flex-col gap-6 px-4 py-8 sm:px-6 lg:px-8">
+        {screen === "form" && (
+          <section>
+            <h1 className="text-3xl font-bold tracking-tight text-neutral-950 md:text-4xl">
+              이번 약속, 누가 얼마나 양보해야 공정할까?
+            </h1>
+            <p className="mt-3 text-sm leading-6 text-neutral-600 md:text-base">
+              대화 파일을 올리고 참여자 조건을 넣으면 시간·장소·메뉴를 함께
+              정합니다.
+            </p>
+          </section>
+        )}
 
         {screen === "loading" && <LoadingView />}
 
@@ -149,62 +134,33 @@ export function MeetingWorkspace() {
         )}
 
         {screen === "form" && (
-          <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_360px]">
-            <AnalysisForm
-              chatFile={chatFile}
-              targetDateText={targetDateText}
-              discussionStartedAt={discussionStartedAt}
-              discussionEndedAt={discussionEndedAt}
-              participants={participants}
-              isSubmitting={analyzeMeeting.isPending}
-              errorMessage={
-                analyzeMeeting.isError
-                  ? "분석 요청에 실패했습니다. 입력값을 확인해 주세요."
-                  : undefined
-              }
-              onChatFileChange={setChatFile}
-              onTargetDateTextChange={setTargetDateText}
-              onDiscussionStartedAtChange={setDiscussionStartedAt}
-              onDiscussionEndedAtChange={setDiscussionEndedAt}
-              onParticipantChange={handleParticipantChange}
-              onAddParticipant={() =>
-                setParticipants((current) => [...current, createParticipant()])
-              }
-              onRemoveParticipant={(id) =>
-                setParticipants((current) =>
-                  current.filter((participant) => participant.id !== id),
-                )
-              }
-              onSubmit={handleSubmit}
-            />
-
-            <aside className="space-y-4">
-              <Panel title="프론트 기준" eyebrow="Scope">
-                <ul className="space-y-3 text-sm leading-6 text-neutral-700">
-                  <li>대화내역 파일 업로드</li>
-                  <li>약속 날짜와 논의 시간 지정</li>
-                  <li>참여자 출발지와 조건 입력</li>
-                  <li>결과는 시간, 장소, 메뉴만 표시</li>
-                </ul>
-              </Panel>
-              <Panel title="결과 표시" eyebrow="Output">
-                <dl className="space-y-3 text-sm">
-                  <div className="flex justify-between gap-4">
-                    <dt className="text-neutral-500">후보</dt>
-                    <dd className="font-semibold text-neutral-950">3순위</dd>
-                  </div>
-                  <div className="flex justify-between gap-4">
-                    <dt className="text-neutral-500">점수</dt>
-                    <dd className="font-semibold text-neutral-950">총합만</dd>
-                  </div>
-                  <div className="flex justify-between gap-4">
-                    <dt className="text-neutral-500">역할</dt>
-                    <dd className="font-semibold text-neutral-950">미표시</dd>
-                  </div>
-                </dl>
-              </Panel>
-            </aside>
-          </div>
+          <AnalysisForm
+            chatFile={chatFile}
+            targetDateText={targetDateText}
+            discussionStartedAt={discussionStartedAt}
+            discussionEndedAt={discussionEndedAt}
+            participants={participants}
+            isSubmitting={analyzeMeeting.isPending}
+            errorMessage={
+              analyzeMeeting.isError
+                ? "분석 요청에 실패했습니다. 입력값을 확인해 주세요."
+                : undefined
+            }
+            onChatFileChange={setChatFile}
+            onTargetDateTextChange={setTargetDateText}
+            onDiscussionStartedAtChange={setDiscussionStartedAt}
+            onDiscussionEndedAtChange={setDiscussionEndedAt}
+            onParticipantChange={handleParticipantChange}
+            onAddParticipant={() =>
+              setParticipants((current) => [...current, createParticipant()])
+            }
+            onRemoveParticipant={(id) =>
+              setParticipants((current) =>
+                current.filter((participant) => participant.id !== id),
+              )
+            }
+            onSubmit={handleSubmit}
+          />
         )}
       </div>
     </main>
