@@ -26,6 +26,7 @@ public class MockController {
                         "rank": 1,
                         "datetime": "2024-02-16T18:00:00+09:00",
                         "location": "홍대입구역 2번 출구",
+                        "menu": "파스타",
                         "confidence": 0.92,
                         "reason": "참가자 전원이 가능한 시간대이며, 가장 많이 언급된 장소입니다."
                       },
@@ -33,6 +34,7 @@ public class MockController {
                         "rank": 2,
                         "datetime": "2024-02-17T18:00:00+09:00",
                         "location": "홍대입구역 2번 출구",
+                        "menu": "고기",
                         "confidence": 0.78,
                         "reason": "2순위로 선호되는 시간대입니다."
                       },
@@ -40,6 +42,7 @@ public class MockController {
                         "rank": 3,
                         "datetime": "2024-02-16T19:00:00+09:00",
                         "location": "홍대입구역 2번 출구",
+                        "menu": "초밥",
                         "confidence": 0.65,
                         "reason": "일부 참가자가 여유있는 시간으로 제안하였습니다."
                       }

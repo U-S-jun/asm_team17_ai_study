@@ -37,11 +37,11 @@ pnpm format
 
 현재는 프론트 흐름 확인용 Mock API가 포함되어 있습니다.
 
-- `POST /api/meetings/analyze`
+- `POST /api/analyze`
 - 요청 타입: `multipart/form-data`
-- 필수 필드: `chatFile`, `targetDateText`, `discussionStartedAt`, `discussionEndedAt`, `participants`
+- 필수 필드: `conversationFile`, `analysisRequest`
 
-실제 Spring API로 붙일 때는 `.env.local`에 API 주소를 넣으면 됩니다.
+기본값은 프론트 로컬 Mock API입니다. 실제 Spring API로 붙일 때는 `.env.local`에 API 주소를 넣으면 됩니다.
 
 ```bash
 NEXT_PUBLIC_API_BASE_URL=http://localhost:8080

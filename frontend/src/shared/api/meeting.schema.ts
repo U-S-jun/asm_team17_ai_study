@@ -33,3 +33,36 @@ export const meetingAnalysisResponseSchema = z.object({
     groupMessageDraft: z.string(),
   }),
 });
+
+export const backendAnalyzeResponseSchema = z
+  .object({
+    success: z.boolean().optional(),
+    data: z
+      .object({
+        status: z.string().optional(),
+        summary: z.string().nullable().optional(),
+        recommendations: z
+          .array(
+            z
+              .object({
+                rank: z.number().optional(),
+                datetime: z.string().nullable().optional(),
+                time: z.string().nullable().optional(),
+                location: z.string().nullable().optional(),
+                place: z.string().nullable().optional(),
+                menu: z.string().nullable().optional(),
+                confidence: z.number().nullable().optional(),
+                score: z.number().nullable().optional(),
+                reason: z.string().nullable().optional(),
+                reasons: z.array(z.string()).nullable().optional(),
+              })
+              .passthrough(),
+          )
+          .optional(),
+      })
+      .nullable()
+      .optional(),
+    error: z.unknown().optional(),
+    meta: z.unknown().optional(),
+  })
+  .passthrough();
