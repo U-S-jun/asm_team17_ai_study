@@ -1,0 +1,18 @@
+spring:
+  application:
+    name: aisomabackend
+  servlet:
+    multipart:
+      max-file-size: 50MB
+      max-request-size: 50MB
+
+server:
+  port: 8080
+
+ai:
+  server:
+    url: http://localhost:8000
+
+logging:
+  level:
+    com.back.aisomabackend: INFO
