@@ -1,5 +1,5 @@
 from typing import Literal, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # ── 양보 이력 ──────────────────────────────────────────────────────────────────
@@ -39,17 +39,32 @@ class InfoSufficiencyJudgment(BaseModel):
 # ── 기존 스키마 ─────────────────────────────────────────────────────────────────
 
 class ParticipantDraft(BaseModel):
-    id: str
+    id: str = ""
     name: str
     startLocation: str
     conditionText: str = ""
+
+
+class DiscussionWindow(BaseModel):
+    startedAt: str = ""
+    endedAt: str = ""
 
 
 class AnalysisRequest(BaseModel):
     targetDateText: str
     discussionStartedAt: str = ""
     discussionEndedAt: str = ""
+    discussionWindow: Optional[DiscussionWindow] = None
     participants: list[ParticipantDraft] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def normalize_discussion_window(self):
+        if self.discussionWindow:
+            if not self.discussionStartedAt:
+                self.discussionStartedAt = self.discussionWindow.startedAt
+            if not self.discussionEndedAt:
+                self.discussionEndedAt = self.discussionWindow.endedAt
+        return self
 
 
 class ExtractedConstraint(BaseModel):
