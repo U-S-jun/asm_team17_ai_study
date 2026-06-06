@@ -14,11 +14,17 @@ public class RestClientConfig {
     @Value("${ai.server.url}")
     private String aiServerUrl;
 
+    @Value("${ai.server.connect-timeout-seconds:10}")
+    private int connectTimeoutSeconds;
+
+    @Value("${ai.server.read-timeout-seconds:120}")
+    private int readTimeoutSeconds;
+
     @Bean
     public RestClient aiRestClient() {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
-        factory.setConnectTimeout(Duration.ofSeconds(30));
-        factory.setReadTimeout(Duration.ofSeconds(30));
+        factory.setConnectTimeout(Duration.ofSeconds(connectTimeoutSeconds));
+        factory.setReadTimeout(Duration.ofSeconds(readTimeoutSeconds));
 
         return RestClient.builder()
                 .baseUrl(aiServerUrl)
