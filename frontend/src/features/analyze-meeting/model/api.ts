@@ -11,11 +11,10 @@ export async function analyzeMeeting(
   const formData = new FormData();
   const analysisRequest = {
     targetDateText: payload.targetDateText,
-    discussionWindow: {
-      startedAt: payload.discussionStartedAt,
-      endedAt: payload.discussionEndedAt,
-    },
+    discussionStartedAt: payload.discussionStartedAt,
+    discussionEndedAt: payload.discussionEndedAt,
     participants: payload.participants.map((participant) => ({
+      id: participant.id,
       name: participant.name,
       startLocation: participant.startLocation,
       conditionText: participant.conditionText,
