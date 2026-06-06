@@ -4,6 +4,7 @@ from fastapi import APIRouter, File, Form, UploadFile, HTTPException
 
 from app.schemas.meeting import AnalysisRequest, MeetingAnalysisResponse
 from app.agent.graph import graph
+from app.api.file_decoder import decode_chat_file
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -16,7 +17,7 @@ async def analyze(
 ):
     try:
         raw_bytes = await conversationFile.read()
-        chat_text = raw_bytes.decode("utf-8", errors="replace")
+        chat_text = decode_chat_file(raw_bytes)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"파일 읽기 실패: {e}")
 
