@@ -191,7 +191,7 @@ Swagger 문서: `http://localhost:8000/docs`
     {"id": "1", "name": "준혁", "startLocation": "해운대", "conditionText": ""},
     {"id": "2", "name": "아름", "startLocation": "부산대", "conditionText": ""},
     {"id": "3", "name": "태양", "startLocation": "동구",  "conditionText": "생선 비린 것 못 먹음"},
-    {"id": "4", name": "소희", "startLocation": "서면",  "conditionText": "오전 불가 오후 2시 이후"}
+    {"id": "4", "name": "소희", "startLocation": "서면",  "conditionText": "오전 불가 오후 2시 이후"}
   ]
 }
 ```
