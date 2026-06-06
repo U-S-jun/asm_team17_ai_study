@@ -4,6 +4,7 @@ import os
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 from app.agent.state import AgentState
+from app.agent.chat_parser import filter_chat_lines
 from app.agent.prompts import (
     HISTORY_SYSTEM_PROMPT,
     EXTRACT_SYSTEM_PROMPT,
@@ -40,11 +41,11 @@ async def history_node(state: AgentState) -> dict:
     started_at = state["discussion_started_at"]
     participant_names = [p.name for p in state["participants"]]
 
-    history_lines: list[str] = []
-    for line in state["chat_text"].splitlines():
-        parts = line.split(",", 2)
-        if len(parts) == 3 and parts[0].strip() < started_at:
-            history_lines.append(line)
+    history_lines = filter_chat_lines(
+        state["chat_text"],
+        started_at,
+        before_start=True,
+    )
 
     if not history_lines:
         logger.info("과거 이력 없음 — history_node 스킵")
@@ -81,16 +82,11 @@ async def extract_node(state: AgentState) -> dict:
     started_at = state["discussion_started_at"]
     ended_at = state["discussion_ended_at"]
 
-    current_lines: list[str] = []
-    for line in state["chat_text"].splitlines():
-        parts = line.split(",", 2)
-        if len(parts) == 3:
-            ts = parts[0].strip()
-            in_range = (not started_at or ts >= started_at) and (
-                not ended_at or ts <= ended_at
-            )
-            if in_range:
-                current_lines.append(line)
+    current_lines = filter_chat_lines(
+        state["chat_text"],
+        started_at,
+        ended_at,
+    )
 
     chat_window = "\n".join(current_lines) if current_lines else state["chat_text"]
 
