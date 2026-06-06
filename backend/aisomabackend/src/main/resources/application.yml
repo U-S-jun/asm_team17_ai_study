@@ -12,6 +12,8 @@ server:
 ai:
   server:
     url: http://localhost:8000
+    connect-timeout-seconds: 10
+    read-timeout-seconds: 120
 
 logging:
   level:
