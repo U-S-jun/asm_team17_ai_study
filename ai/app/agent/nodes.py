@@ -1,6 +1,9 @@
+from __future__ import annotations
+
 import json
 import logging
 import os
+import re
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 from app.agent.state import AgentState
@@ -14,6 +17,7 @@ from app.agent.prompts import (
     FALLBACK_SYSTEM_PROMPT,
 )
 from app.schemas.meeting import (
+    CandidateHint,
     ConcessionHistoryResult,
     ExtractionResult,
     InfoSufficiencyJudgment,
@@ -32,6 +36,367 @@ def _get_llm() -> ChatOpenAI:
         api_key=os.getenv("UPSTAGE_API_KEY"),
         base_url="https://api.upstage.ai/v1",
     )
+
+
+PRIMARY_KEYWORDS = ("1순위", "확정", "거의 확정", "제일 무난", "가장 무난", "기본 제안")
+FALLBACK_KEYWORDS = ("자리 없으면", "안 되면", "대체", "2순위", "후보로 두자")
+REJECT_KEYWORDS = ("빼자", "제외", "애매", "너무 멀", "불편", "부담스럽", "이동이 좀 늘")
+CLOCK_PATTERN = re.compile(r"(?P<hour>\d{1,2}):(?P<minute>\d{2})")
+KOREAN_TIME_PATTERN = re.compile(
+    r"(?P<hour>\d{1,2})\s*시\s*(?P<half>반)?\s*(?P<minute>\d{1,2})?\s*분?"
+)
+
+
+def _normalize_text(value: str | None) -> str:
+    return re.sub(r"[\s,./()_-]+", "", value or "").lower()
+
+
+def _has_hint_value(hint: CandidateHint | None) -> bool:
+    return bool(hint and (hint.time.strip() or hint.place.strip() or hint.menu.strip()))
+
+
+def _message_body(line: str) -> str:
+    parts = line.split(",", 2)
+    if len(parts) == 3 and re.match(r"\d{4}[.-]\d{2}[.-]\d{2}\s+\d{2}:\d{2}", parts[0]):
+        return parts[2]
+    return line
+
+
+def _merge_hints(previous: CandidateHint | None, current: CandidateHint) -> CandidateHint:
+    if not previous:
+        return current
+    return CandidateHint(
+        time=current.time or previous.time,
+        place=current.place or previous.place,
+        menu=current.menu or previous.menu,
+        reason=current.reason or previous.reason,
+    )
+
+
+def _prepend_reason(reasons: list[str], reason: str) -> list[str]:
+    cleaned = [r for r in reasons if r and r != reason]
+    return [reason, *cleaned][:6]
+
+
+def _clamp_score(score: float | int | None) -> float:
+    try:
+        value = float(score if score is not None else 0.0)
+    except (TypeError, ValueError):
+        value = 0.0
+    return max(0.0, min(100.0, value))
+
+
+def _extract_clock_text(text: str, candidate_times: list[str]) -> str:
+    clock_match = CLOCK_PATTERN.search(text)
+    if clock_match:
+        target = f"{int(clock_match.group('hour')):02d}:{clock_match.group('minute')}"
+    else:
+        korean_match = KOREAN_TIME_PATTERN.search(text)
+        if not korean_match:
+            return ""
+        hour = int(korean_match.group("hour"))
+        if hour < 12:
+            hour += 12
+        minute = 30 if korean_match.group("half") else int(korean_match.group("minute") or 0)
+        target = f"{hour:02d}:{minute:02d}"
+
+    for candidate_time in candidate_times:
+        if target in candidate_time:
+            return candidate_time
+    return target
+
+
+def _find_option(options: list[str], text: str) -> str:
+    normalized_text = _normalize_text(text)
+    for option in sorted(options, key=len, reverse=True):
+        normalized_option = _normalize_text(option)
+        if normalized_option and (
+            normalized_option in normalized_text or normalized_text in normalized_option
+        ):
+            return option
+
+        for token in re.split(r"[\s/,_-]+", option):
+            normalized_token = _normalize_text(token)
+            if len(normalized_token) >= 2 and normalized_token in normalized_text:
+                return option
+    return ""
+
+
+def _hint_from_line(
+    line: str,
+    extracted: ExtractionResult,
+    *,
+    fallback: bool = False,
+) -> CandidateHint:
+    search_text = _message_body(line)
+    if fallback:
+        for keyword in FALLBACK_KEYWORDS:
+            if keyword in search_text:
+                search_text = search_text.split(keyword, 1)[-1]
+                break
+    else:
+        for keyword in FALLBACK_KEYWORDS:
+            if keyword in search_text:
+                search_text = search_text.split(keyword, 1)[0]
+                break
+
+    return CandidateHint(
+        time=_extract_clock_text(search_text, extracted.candidateTimes),
+        place=_find_option(extracted.candidatePlaces, search_text),
+        menu=_find_option(extracted.candidateMenus, search_text),
+        reason=line.strip(),
+    )
+
+
+def _augment_decision_hints(extracted: ExtractionResult, current_lines: list[str]) -> ExtractionResult:
+    primary = extracted.primaryCandidate
+    fallbacks = list(extracted.fallbackCandidates)
+    rejected = list(extracted.rejectedOptions)
+
+    for line in current_lines:
+        if any(keyword in line for keyword in PRIMARY_KEYWORDS):
+            hint = _hint_from_line(line, extracted)
+            if _has_hint_value(hint):
+                primary = _merge_hints(primary, hint)
+
+        if any(keyword in line for keyword in FALLBACK_KEYWORDS):
+            hint = _hint_from_line(line, extracted, fallback=True)
+            if _has_hint_value(hint):
+                fallbacks.append(hint)
+
+        if any(keyword in line for keyword in REJECT_KEYWORDS):
+            hint = _hint_from_line(line, extracted)
+            if _has_hint_value(hint):
+                rejected.append(hint)
+
+    extracted.primaryCandidate = primary if _has_hint_value(primary) else None
+    extracted.fallbackCandidates = _dedupe_hints(fallbacks)
+    extracted.rejectedOptions = _dedupe_hints(rejected)
+    return extracted
+
+
+def _dedupe_hints(hints: list[CandidateHint]) -> list[CandidateHint]:
+    seen: set[tuple[str, str, str]] = set()
+    deduped: list[CandidateHint] = []
+    for hint in hints:
+        if not _has_hint_value(hint):
+            continue
+        key = (
+            _normalize_text(hint.time),
+            _normalize_text(hint.place),
+            _normalize_text(hint.menu),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(hint)
+    return deduped
+
+
+def _time_matches(candidate_time: str, hint_time: str) -> bool:
+    if not hint_time:
+        return True
+    candidate_clock = CLOCK_PATTERN.search(candidate_time)
+    hint_clock = CLOCK_PATTERN.search(hint_time)
+    if candidate_clock and hint_clock:
+        return candidate_clock.group(0) == hint_clock.group(0)
+    candidate_norm = _normalize_text(candidate_time)
+    hint_norm = _normalize_text(hint_time)
+    return bool(hint_norm and (hint_norm in candidate_norm or candidate_norm in hint_norm))
+
+
+def _field_matches(candidate_value: str, hint_value: str) -> bool:
+    if not hint_value:
+        return True
+    candidate_norm = _normalize_text(candidate_value)
+    hint_norm = _normalize_text(hint_value)
+    return bool(hint_norm and (hint_norm in candidate_norm or candidate_norm in hint_norm))
+
+
+def _candidate_matches_hint(candidate: RankedCandidate, hint: CandidateHint) -> bool:
+    checks = []
+    if hint.time:
+        checks.append(_time_matches(candidate.time, hint.time))
+    if hint.place:
+        checks.append(_field_matches(candidate.place, hint.place))
+    if hint.menu:
+        checks.append(_field_matches(candidate.menu, hint.menu))
+    return bool(checks) and all(checks)
+
+
+def _resolve_time(hint: CandidateHint, extracted: ExtractionResult) -> str:
+    if hint.time:
+        clock = CLOCK_PATTERN.search(hint.time)
+        if clock:
+            for candidate_time in extracted.candidateTimes:
+                if clock.group(0) in candidate_time:
+                    return candidate_time
+        return hint.time
+    return extracted.candidateTimes[0] if extracted.candidateTimes else "미정"
+
+
+def _resolve_place(
+    hint: CandidateHint,
+    extracted: ExtractionResult,
+    primary: CandidateHint | None = None,
+) -> str:
+    if hint.place:
+        return hint.place
+
+    primary_location = ""
+    if primary and primary.place:
+        primary_location = re.split(r"[\s/,_-]+", primary.place.strip())[0]
+
+    menu_norm = _normalize_text(hint.menu).replace("집", "")
+    location_norm = _normalize_text(primary_location)
+    if menu_norm and location_norm:
+        for place in extracted.candidatePlaces:
+            place_norm = _normalize_text(place)
+            if location_norm in place_norm and menu_norm in place_norm:
+                return place
+
+    if primary_location:
+        return primary_location
+    return extracted.candidatePlaces[0] if extracted.candidatePlaces else "미정"
+
+
+def _resolve_menu(hint: CandidateHint, extracted: ExtractionResult) -> str:
+    if hint.menu:
+        return hint.menu
+    return extracted.candidateMenus[0] if extracted.candidateMenus else "미정"
+
+
+def _candidate_key(candidate: RankedCandidate) -> tuple[str, str, str]:
+    return (
+        _normalize_text(candidate.time),
+        _normalize_text(candidate.place),
+        _normalize_text(candidate.menu),
+    )
+
+
+def _pop_matching_candidate(
+    candidates: list[RankedCandidate],
+    hint: CandidateHint,
+) -> RankedCandidate | None:
+    for index, candidate in enumerate(candidates):
+        if _candidate_matches_hint(candidate, hint):
+            return candidates.pop(index)
+    return None
+
+
+def _candidate_from_hint(
+    hint: CandidateHint,
+    extracted: ExtractionResult,
+    *,
+    score: float,
+    primary: CandidateHint | None = None,
+) -> RankedCandidate:
+    return RankedCandidate(
+        candidateId="candidate-0",
+        rank=0,
+        time=_resolve_time(hint, extracted),
+        place=_resolve_place(hint, extracted, primary),
+        menu=_resolve_menu(hint, extracted),
+        totalScore=score,
+        reasons=[],
+    )
+
+
+def _postprocess_ranked_candidates(
+    candidates: list[RankedCandidate],
+    extracted: ExtractionResult,
+) -> list[RankedCandidate]:
+    working = list(candidates)
+    for candidate in working:
+        candidate.totalScore = _clamp_score(candidate.totalScore)
+
+    primary = extracted.primaryCandidate if _has_hint_value(extracted.primaryCandidate) else None
+    fallbacks = _dedupe_hints(extracted.fallbackCandidates)
+    rejected = _dedupe_hints(extracted.rejectedOptions)
+
+    ordered: list[RankedCandidate] = []
+
+    if primary:
+        candidate = _pop_matching_candidate(working, primary) or _candidate_from_hint(
+            primary, extracted, score=100.0
+        )
+        candidate.totalScore = 100.0
+        candidate.reasons = _prepend_reason(
+            candidate.reasons,
+            f"현재 논의에서 1순위/확정 후보로 명시됨: {primary.reason or '명시 후보'}",
+        )
+        ordered.append(candidate)
+
+    for fallback in fallbacks:
+        candidate = _pop_matching_candidate(working, fallback) or _candidate_from_hint(
+            fallback, extracted, score=92.0, primary=primary
+        )
+        candidate.totalScore = min(92.0, max(_clamp_score(candidate.totalScore), 88.0))
+        candidate.reasons = _prepend_reason(
+            candidate.reasons,
+            f"현재 논의에서 대체안으로 명시됨: {fallback.reason or '명시 대체안'}",
+        )
+        ordered.append(candidate)
+        if len(ordered) >= 3:
+            break
+
+    rest: list[RankedCandidate] = []
+    for candidate in working:
+        for rejected_hint in rejected:
+            if _candidate_matches_hint(candidate, rejected_hint):
+                candidate.totalScore = _clamp_score(candidate.totalScore - 25.0)
+                candidate.reasons = _prepend_reason(
+                    candidate.reasons,
+                    f"현재 논의에서 제외/부담 후보로 언급됨: {rejected_hint.reason or '제외 후보'}",
+                )
+                break
+
+        if primary and not any(_candidate_matches_hint(candidate, hint) for hint in [primary, *fallbacks]):
+            candidate.totalScore = min(candidate.totalScore, 88.0)
+            candidate.reasons = _prepend_reason(
+                candidate.reasons,
+                "과거 양보 이력은 현재 명시 합의를 뒤집지 않는 보조 기준으로만 반영됨",
+            )
+
+        candidate.totalScore = _clamp_score(candidate.totalScore)
+        rest.append(candidate)
+
+    rest.sort(key=lambda candidate: candidate.totalScore, reverse=True)
+
+    result: list[RankedCandidate] = []
+    seen: set[tuple[str, str, str]] = set()
+    for candidate in [*ordered, *rest]:
+        key = _candidate_key(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(candidate)
+        if len(result) == 3:
+            break
+
+    times = extracted.candidateTimes or ["미정"]
+    places = extracted.candidatePlaces or ["미정"]
+    menus = extracted.candidateMenus or ["미정"]
+    while len(result) < 3:
+        idx = len(result)
+        result.append(
+            RankedCandidate(
+                candidateId=f"candidate-{idx + 1}",
+                rank=idx + 1,
+                time=times[idx % len(times)],
+                place=places[idx % len(places)],
+                menu=menus[idx % len(menus)],
+                totalScore=max(0.0, (result[-1].totalScore if result else 50.0) - 10.0),
+                reasons=["대안 후보 (상위 후보와 유사한 조건으로 자동 생성)"],
+            )
+        )
+
+    for index, candidate in enumerate(result[:3], start=1):
+        candidate.rank = index
+        candidate.candidateId = f"candidate-{index}"
+        candidate.totalScore = _clamp_score(candidate.totalScore)
+
+    return result[:3]
 
 
 # ── 1. history_node ────────────────────────────────────────────────────────────
@@ -110,6 +475,7 @@ async def extract_node(state: AgentState) -> dict:
     result = await llm.with_structured_output(ExtractionResult).ainvoke(
         [SystemMessage(content=EXTRACT_SYSTEM_PROMPT), HumanMessage(content=user_message)]
     )
+    result = _augment_decision_hints(result, current_lines or state["chat_text"].splitlines())
     return {"extracted": result}
 
 
@@ -128,6 +494,19 @@ async def rank_node(state: AgentState) -> dict:
 
     constraints_json = json.dumps(
         [c.model_dump() for c in extracted.constraints],
+        ensure_ascii=False,
+        indent=2,
+    )
+    decision_hints_json = json.dumps(
+        {
+            "primaryCandidate": (
+                extracted.primaryCandidate.model_dump()
+                if extracted.primaryCandidate
+                else None
+            ),
+            "fallbackCandidates": [c.model_dump() for c in extracted.fallbackCandidates],
+            "rejectedOptions": [c.model_dump() for c in extracted.rejectedOptions],
+        },
         ensure_ascii=False,
         indent=2,
     )
@@ -156,6 +535,9 @@ async def rank_node(state: AgentState) -> dict:
 채팅 기반 제약 조건:
 {constraints_json}
 
+현재 논의에서 명시된 후보:
+{decision_hints_json}
+
 참여자 개인 추가 조건:
 {participants_conditions or "없음"}
 {history_section}"""
@@ -165,33 +547,8 @@ async def rank_node(state: AgentState) -> dict:
         [SystemMessage(content=RANK_SYSTEM_PROMPT), HumanMessage(content=user_message)]
     )
 
-    candidates = result.rankedCandidates
-
-    # 3개 미만이면 부족한 슬롯을 기본값으로 채움
-    times = extracted.candidateTimes or ["미정"]
-    places = extracted.candidatePlaces or ["미정"]
-    menus = extracted.candidateMenus or ["미정"]
-
-    while len(candidates) < 3:
-        idx = len(candidates)
-        candidates.append(
-            RankedCandidate(
-                candidateId=f"candidate-{idx + 1}",
-                rank=idx + 1,
-                time=times[idx % len(times)],
-                place=places[idx % len(places)],
-                menu=menus[idx % len(menus)],
-                totalScore=max(0.0, (candidates[-1].totalScore if candidates else 50.0) - 10.0),
-                reasons=["대안 후보 (상위 후보와 유사한 조건으로 자동 생성)"],
-            )
-        )
-        logger.info("후보 자동 보완 — candidate-%d 추가", idx + 1)
-
-    # rank 필드 순서 정렬 보장
-    for i, c in enumerate(candidates[:3]):
-        c.rank = i + 1
-
-    return {"ranked_candidates": candidates[:3]}
+    candidates = _postprocess_ranked_candidates(result.rankedCandidates, extracted)
+    return {"ranked_candidates": candidates}
 
 
 # ── 4. recommend_node ──────────────────────────────────────────────────────────
