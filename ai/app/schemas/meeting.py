@@ -75,6 +75,13 @@ class ExtractedConstraint(BaseModel):
     content: str = Field(description="제약 조건 내용")
 
 
+class CandidateHint(BaseModel):
+    time: str = Field(default="", description="현재 대화에서 언급된 후보 시간")
+    place: str = Field(default="", description="현재 대화에서 언급된 후보 장소")
+    menu: str = Field(default="", description="현재 대화에서 언급된 후보 메뉴")
+    reason: str = Field(default="", description="후보로 판단한 대화상 근거")
+
+
 class ExtractionResult(BaseModel):
     participants: list[str] = Field(description="채팅에서 확인된 참여자 이름 목록")
     candidateTimes: list[str] = Field(description="후보 약속 시간 목록 (예: '2024-01-20 19:00')")
@@ -82,6 +89,18 @@ class ExtractionResult(BaseModel):
     candidateMenus: list[str] = Field(description="후보 메뉴/음식 카테고리 목록")
     constraints: list[ExtractedConstraint] = Field(description="참여자별 제약 조건 목록")
     needsMoreInfo: list[str] = Field(description="결정에 필요하지만 정보가 부족한 항목 목록")
+    primaryCandidate: Optional[CandidateHint] = Field(
+        default=None,
+        description="현재 논의에서 1순위/확정에 가장 가까운 후보",
+    )
+    fallbackCandidates: list[CandidateHint] = Field(
+        default_factory=list,
+        description="현재 논의에서 명시된 2순위/대체 후보",
+    )
+    rejectedOptions: list[CandidateHint] = Field(
+        default_factory=list,
+        description="현재 논의에서 제외하거나 부담스럽다고 언급된 후보",
+    )
 
 
 class RankedCandidate(BaseModel):
