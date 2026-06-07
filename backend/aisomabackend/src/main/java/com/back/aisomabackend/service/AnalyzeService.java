@@ -24,10 +24,17 @@ public class AnalyzeService {
     private final RestClient aiRestClient;
 
     public ResponseEntity<String> forward(MultipartFile conversationFile, String analysisRequest) throws IOException {
-        log.info("분석 요청 수신 - 파일명: {}", conversationFile.getOriginalFilename());
+        long startedAt = System.nanoTime();
 
         String filename = conversationFile.getOriginalFilename();
         byte[] fileBytes = conversationFile.getBytes();
+        int requestLength = analysisRequest == null ? 0 : analysisRequest.length();
+        log.info(
+                "분석 요청 수신 - 파일명: {}, 파일크기: {} bytes, analysisRequestLength: {} chars",
+                filename,
+                fileBytes.length,
+                requestLength
+        );
 
         MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
         body.add("conversationFile", new ByteArrayResource(fileBytes) {
@@ -39,6 +46,7 @@ public class AnalyzeService {
         body.add("analysisRequest", analysisRequest);
 
         try {
+            log.info("AI 서버 요청 전송 - endpoint: /api/analyze");
             ResponseEntity<String> response = aiRestClient.post()
                     .uri("/api/analyze")
                     .contentType(MediaType.MULTIPART_FORM_DATA)
@@ -46,17 +54,33 @@ public class AnalyzeService {
                     .retrieve()
                     .toEntity(String.class);
 
-            log.info("AI 서버 응답 - 상태코드: {}", response.getStatusCode());
+            log.info(
+                    "AI 서버 응답 - 상태코드: {}, elapsed={}ms",
+                    response.getStatusCode(),
+                    elapsedMillis(startedAt)
+            );
             return response;
 
         } catch (HttpStatusCodeException e) {
-            log.error("AI 서버 오류 - 상태코드: {}", e.getStatusCode());
+            log.error(
+                    "AI 서버 오류 - 상태코드: {}, elapsed={}ms",
+                    e.getStatusCode(),
+                    elapsedMillis(startedAt)
+            );
             return ResponseEntity.status(e.getStatusCode()).body(e.getResponseBodyAsString());
 
         } catch (RestClientException e) {
-            log.error("AI 서버 연결 오류: {}", e.getMessage());
+            log.error(
+                    "AI 서버 연결 오류: {}, elapsed={}ms",
+                    e.getMessage(),
+                    elapsedMillis(startedAt)
+            );
             return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
                     .body("{\"success\":false,\"data\":null,\"error\":\"AI 서버에 연결할 수 없습니다.\",\"meta\":null}");
         }
+    }
+
+    private long elapsedMillis(long startedAt) {
+        return (System.nanoTime() - startedAt) / 1_000_000;
     }
 }

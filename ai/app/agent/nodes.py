@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import time
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 from app.agent.state import AgentState
@@ -29,6 +30,43 @@ from app.schemas.meeting import (
 logger = logging.getLogger(__name__)
 
 
+def _meeting_id(state: AgentState) -> int | str:
+    return state.get("meeting_id", "unknown")
+
+
+def _elapsed_ms(started_at: float) -> float:
+    return (time.perf_counter() - started_at) * 1000
+
+
+def _candidate_summary(candidate: RankedCandidate) -> str:
+    return (
+        f"#{candidate.rank} {candidate.time} / {candidate.place} / "
+        f"{candidate.menu} ({candidate.totalScore:.1f})"
+    )
+
+
+def _candidate_list_summary(candidates: list[RankedCandidate] | None) -> str:
+    if not candidates:
+        return "(없음)"
+    return " | ".join(_candidate_summary(candidate) for candidate in candidates[:3])
+
+
+def _short_list(values: list[str] | None, limit: int = 4) -> str:
+    if not values:
+        return "[]"
+    shown = ", ".join(values[:limit])
+    if len(values) > limit:
+        shown += f", +{len(values) - limit} more"
+    return f"[{shown}]"
+
+
+def _preview(text: str | None, limit: int = 80) -> str:
+    normalized = re.sub(r"\s+", " ", text or "").strip()
+    if len(normalized) <= limit:
+        return normalized
+    return f"{normalized[:limit]}..."
+
+
 def _get_llm() -> ChatOpenAI:
     return ChatOpenAI(
         model=os.getenv("UPSTAGE_MODEL", "solar-pro"),
@@ -45,10 +83,28 @@ CLOCK_PATTERN = re.compile(r"(?P<hour>\d{1,2}):(?P<minute>\d{2})")
 KOREAN_TIME_PATTERN = re.compile(
     r"(?P<hour>\d{1,2})\s*시\s*(?P<half>반)?\s*(?P<minute>\d{1,2})?\s*분?"
 )
+CANDIDATE_ID_PATTERN = re.compile(r"\bcandidate-(?P<rank>\d+)\b", re.IGNORECASE)
 
 
 def _normalize_text(value: str | None) -> str:
     return re.sub(r"[\s,./()_-]+", "", value or "").lower()
+
+
+def _remove_public_candidate_ids(text: str) -> str:
+    cleaned = re.sub(r"\s*[\(\[]\s*candidate-\d+\s*[\)\]]", "", text, flags=re.IGNORECASE)
+    cleaned = CANDIDATE_ID_PATTERN.sub(
+        lambda match: f"{match.group('rank')}순위 후보",
+        cleaned,
+    )
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    cleaned = re.sub(r"\s+([,.!?])", r"\1", cleaned)
+    return cleaned.strip()
+
+
+def _sanitize_recommendation(result: RecommendationResult) -> RecommendationResult:
+    result.summary = _remove_public_candidate_ids(result.summary)
+    result.groupMessageDraft = _remove_public_candidate_ids(result.groupMessageDraft)
+    return result
 
 
 def _has_hint_value(hint: CandidateHint | None) -> bool:
@@ -403,17 +459,34 @@ def _postprocess_ranked_candidates(
 # discussionStartedAt 이전 메시지를 파싱하여 참여자별 양보 이력을 수치화합니다.
 
 async def history_node(state: AgentState) -> dict:
+    started = time.perf_counter()
+    meeting_id = _meeting_id(state)
     started_at = state["discussion_started_at"]
     participant_names = [p.name for p in state["participants"]]
+    logger.info(
+        "[meetingId=%s] [1/6 history] START - discussionStartedAt=%s, participants=%d",
+        meeting_id,
+        started_at or "(없음)",
+        len(participant_names),
+    )
 
     history_lines = filter_chat_lines(
         state["chat_text"],
         started_at,
         before_start=True,
     )
+    logger.info(
+        "[meetingId=%s] [1/6 history] FILTER_DONE - historyLines=%d",
+        meeting_id,
+        len(history_lines),
+    )
 
     if not history_lines:
-        logger.info("과거 이력 없음 — history_node 스킵")
+        logger.info(
+            "[meetingId=%s] [1/6 history] SKIP - 과거 이력 없음, elapsed=%.0fms",
+            meeting_id,
+            _elapsed_ms(started),
+        )
         return {
             "concession_history": ConcessionHistoryResult(
                 hasHistory=False, participants=[], summary="과거 약속 이력 없음"
@@ -433,10 +506,20 @@ async def history_node(state: AgentState) -> dict:
 ---
 위 내용에서 과거 약속 관련 대화를 찾아 참여자별 양보 이력을 수치화하세요."""
 
+    logger.info(
+        "[meetingId=%s] [1/6 history] LLM_START - 과거 양보 이력 분석 요청",
+        meeting_id,
+    )
     result = await structured_llm.ainvoke(
         [SystemMessage(content=HISTORY_SYSTEM_PROMPT), HumanMessage(content=user_message)]
     )
-    logger.info("양보 이력 분석 완료 — hasHistory=%s", result.hasHistory)
+    logger.info(
+        "[meetingId=%s] [1/6 history] DONE - hasHistory=%s, analyzedParticipants=%d, elapsed=%.0fms",
+        meeting_id,
+        result.hasHistory,
+        len(result.participants),
+        _elapsed_ms(started),
+    )
     return {"concession_history": result}
 
 
@@ -444,8 +527,16 @@ async def history_node(state: AgentState) -> dict:
 # discussionStartedAt ~ discussionEndedAt 구간의 현재 논의를 분석합니다.
 
 async def extract_node(state: AgentState) -> dict:
+    started = time.perf_counter()
+    meeting_id = _meeting_id(state)
     started_at = state["discussion_started_at"]
     ended_at = state["discussion_ended_at"]
+    logger.info(
+        "[meetingId=%s] [2/6 extract] START - discussionWindow=%s~%s",
+        meeting_id,
+        started_at or "(없음)",
+        ended_at or "(없음)",
+    )
 
     current_lines = filter_chat_lines(
         state["chat_text"],
@@ -454,6 +545,12 @@ async def extract_node(state: AgentState) -> dict:
     )
 
     chat_window = "\n".join(current_lines) if current_lines else state["chat_text"]
+    logger.info(
+        "[meetingId=%s] [2/6 extract] FILTER_DONE - currentLines=%d, fallbackToFullChat=%s",
+        meeting_id,
+        len(current_lines),
+        not bool(current_lines),
+    )
 
     participants_info = "\n".join(
         f"- {p.name} (출발지: {p.startLocation}, 조건: {p.conditionText or '없음'})"
@@ -472,10 +569,32 @@ async def extract_node(state: AgentState) -> dict:
 """
 
     llm = _get_llm()
+    logger.info(
+        "[meetingId=%s] [2/6 extract] LLM_START - 후보 시간/장소/메뉴/제약 추출 요청",
+        meeting_id,
+    )
     result = await llm.with_structured_output(ExtractionResult).ainvoke(
         [SystemMessage(content=EXTRACT_SYSTEM_PROMPT), HumanMessage(content=user_message)]
     )
     result = _augment_decision_hints(result, current_lines or state["chat_text"].splitlines())
+    logger.info(
+        "[meetingId=%s] [2/6 extract] DONE - currentLines=%d, counts(time/place/menu/constraints/needs)=%d/%d/%d/%d/%d, "
+        "primary=%s, fallback=%d, rejected=%d, times=%s, places=%s, menus=%s, elapsed=%.0fms",
+        meeting_id,
+        len(current_lines),
+        len(result.candidateTimes),
+        len(result.candidatePlaces),
+        len(result.candidateMenus),
+        len(result.constraints),
+        len(result.needsMoreInfo),
+        "있음" if _has_hint_value(result.primaryCandidate) else "없음",
+        len(result.fallbackCandidates),
+        len(result.rejectedOptions),
+        _short_list(result.candidateTimes),
+        _short_list(result.candidatePlaces),
+        _short_list(result.candidateMenus),
+        _elapsed_ms(started),
+    )
     return {"extracted": result}
 
 
@@ -483,8 +602,19 @@ async def extract_node(state: AgentState) -> dict:
 # 양보 이력을 가중치로 반영하여 후보를 점수화합니다.
 
 async def rank_node(state: AgentState) -> dict:
+    started = time.perf_counter()
+    meeting_id = _meeting_id(state)
     extracted = state["extracted"]
     history = state.get("concession_history")
+    logger.info(
+        "[meetingId=%s] [4/6 rank] START - candidates(time/place/menu)=%d/%d/%d, constraints=%d, hasHistory=%s",
+        meeting_id,
+        len(extracted.candidateTimes),
+        len(extracted.candidatePlaces),
+        len(extracted.candidateMenus),
+        len(extracted.constraints),
+        bool(history and history.hasHistory),
+    )
 
     participants_conditions = "\n".join(
         f"- {p.name}: {p.conditionText}"
@@ -543,17 +673,39 @@ async def rank_node(state: AgentState) -> dict:
 {history_section}"""
 
     llm = _get_llm()
+    logger.info(
+        "[meetingId=%s] [4/6 rank] LLM_START - 후보 조합 점수화 요청",
+        meeting_id,
+    )
     result = await llm.with_structured_output(RankingResult).ainvoke(
         [SystemMessage(content=RANK_SYSTEM_PROMPT), HumanMessage(content=user_message)]
     )
 
+    logger.info(
+        "[meetingId=%s] [4/6 rank] LLM_DONE - rawCandidates=%d, 후처리 시작",
+        meeting_id,
+        len(result.rankedCandidates),
+    )
     candidates = _postprocess_ranked_candidates(result.rankedCandidates, extracted)
+    logger.info(
+        "[meetingId=%s] [4/6 rank] DONE - finalTop3=%s, elapsed=%.0fms",
+        meeting_id,
+        _candidate_list_summary(candidates),
+        _elapsed_ms(started),
+    )
     return {"ranked_candidates": candidates}
 
 
 # ── 4. recommend_node ──────────────────────────────────────────────────────────
 
 async def recommend_node(state: AgentState) -> dict:
+    started = time.perf_counter()
+    meeting_id = _meeting_id(state)
+    logger.info(
+        "[meetingId=%s] [6/6 message] START - mode=recommend, topCandidates=%s",
+        meeting_id,
+        _candidate_list_summary(state["ranked_candidates"]),
+    )
     candidates_json = json.dumps(
         [c.model_dump() for c in state["ranked_candidates"]],
         ensure_ascii=False,
@@ -568,8 +720,20 @@ async def recommend_node(state: AgentState) -> dict:
 """
 
     llm = _get_llm()
+    logger.info(
+        "[meetingId=%s] [6/6 message] LLM_START - 단독 추천 메시지 생성 요청",
+        meeting_id,
+    )
     result = await llm.with_structured_output(RecommendationResult).ainvoke(
         [SystemMessage(content=RECOMMEND_SYSTEM_PROMPT), HumanMessage(content=user_message)]
+    )
+    result = _sanitize_recommendation(result)
+    logger.info(
+        "[meetingId=%s] [6/6 message] DONE - mode=recommend, selectedCandidateId=%s, draft=%s, elapsed=%.0fms",
+        meeting_id,
+        result.selectedCandidateId,
+        _preview(result.groupMessageDraft),
+        _elapsed_ms(started),
     )
     return {"recommendation": result}
 
@@ -577,7 +741,14 @@ async def recommend_node(state: AgentState) -> dict:
 # ── 5. negotiate_node ──────────────────────────────────────────────────────────
 
 async def negotiate_node(state: AgentState) -> dict:
+    started = time.perf_counter()
+    meeting_id = _meeting_id(state)
     candidates = state["ranked_candidates"]
+    logger.info(
+        "[meetingId=%s] [6/6 message] START - mode=negotiate, topCandidates=%s",
+        meeting_id,
+        _candidate_list_summary(candidates),
+    )
     candidates_json = json.dumps(
         [c.model_dump() for c in candidates],
         ensure_ascii=False,
@@ -607,8 +778,20 @@ async def negotiate_node(state: AgentState) -> dict:
 """
 
     llm = _get_llm()
+    logger.info(
+        "[meetingId=%s] [6/6 message] LLM_START - 복수 선택지 조율 메시지 생성 요청",
+        meeting_id,
+    )
     result = await llm.with_structured_output(RecommendationResult).ainvoke(
         [SystemMessage(content=NEGOTIATE_SYSTEM_PROMPT), HumanMessage(content=user_message)]
+    )
+    result = _sanitize_recommendation(result)
+    logger.info(
+        "[meetingId=%s] [6/6 message] DONE - mode=negotiate, selectedCandidateId=%s, draft=%s, elapsed=%.0fms",
+        meeting_id,
+        result.selectedCandidateId,
+        _preview(result.groupMessageDraft),
+        _elapsed_ms(started),
     )
     return {"recommendation": result}
 
@@ -616,8 +799,15 @@ async def negotiate_node(state: AgentState) -> dict:
 # ── 6. fallback_node ───────────────────────────────────────────────────────────
 
 async def fallback_node(state: AgentState) -> dict:
+    started = time.perf_counter()
+    meeting_id = _meeting_id(state)
     extracted = state["extracted"]
     needs = extracted.needsMoreInfo if extracted else []
+    logger.info(
+        "[meetingId=%s] [6/6 message] START - mode=fallback, needsMoreInfo=%s",
+        meeting_id,
+        needs or [],
+    )
 
     user_message = f"""추출된 정보가 부족하여 순위를 결정하기 어렵습니다.
 부족한 항목: {json.dumps(needs, ensure_ascii=False)}
@@ -625,9 +815,14 @@ async def fallback_node(state: AgentState) -> dict:
 """
 
     llm = _get_llm()
+    logger.info(
+        "[meetingId=%s] [6/6 message] LLM_START - 정보 부족 안내 메시지 생성 요청",
+        meeting_id,
+    )
     result = await llm.with_structured_output(RecommendationResult).ainvoke(
         [SystemMessage(content=FALLBACK_SYSTEM_PROMPT), HumanMessage(content=user_message)]
     )
+    result = _sanitize_recommendation(result)
 
     placeholder = RankedCandidate(
         candidateId="candidate-1",
@@ -637,6 +832,13 @@ async def fallback_node(state: AgentState) -> dict:
         menu="미정",
         totalScore=0.0,
         reasons=["정보 부족으로 자동 순위를 결정할 수 없습니다."],
+    )
+    logger.info(
+        "[meetingId=%s] [6/6 message] DONE - mode=fallback, selectedCandidateId=%s, draft=%s, elapsed=%.0fms",
+        meeting_id,
+        result.selectedCandidateId,
+        _preview(result.groupMessageDraft),
+        _elapsed_ms(started),
     )
     return {
         "ranked_candidates": [placeholder],
@@ -648,15 +850,21 @@ async def fallback_node(state: AgentState) -> dict:
 
 async def route_after_extract(state: AgentState) -> str:
     """LLM이 현재 논의 추출 결과를 보고 랭킹 진행 여부를 판단합니다."""
+    meeting_id = _meeting_id(state)
     extracted = state.get("extracted")
     if not extracted:
+        logger.info("[meetingId=%s] [3/6 sufficiency] NEXT=fallback - 추출 결과 없음", meeting_id)
         return "insufficient"
 
     if not extracted.candidatePlaces and not extracted.candidateTimes:
-        logger.info("route_after_extract → insufficient (장소/시간 모두 없음)")
+        logger.info("[meetingId=%s] [3/6 sufficiency] NEXT=fallback - 장소/시간 모두 없음", meeting_id)
         return "insufficient"
 
     llm = _get_llm()
+    logger.info(
+        "[meetingId=%s] [3/6 sufficiency] LLM_START - 랭킹 진행 가능 여부 판단 요청",
+        meeting_id,
+    )
     judgment = await llm.with_structured_output(InfoSufficiencyJudgment).ainvoke(
         [
             SystemMessage(
@@ -675,22 +883,33 @@ async def route_after_extract(state: AgentState) -> str:
     )
 
     route = "sufficient" if judgment.is_sufficient else "insufficient"
-    logger.info("route_after_extract → %s (%s)", route, judgment.reason)
+    next_node = "rank" if route == "sufficient" else "fallback"
+    logger.info(
+        "[meetingId=%s] [3/6 sufficiency] NEXT=%s - isSufficient=%s, reason=%s",
+        meeting_id,
+        next_node,
+        judgment.is_sufficient,
+        judgment.reason,
+    )
     return route
 
 
 def route_after_rank(state: AgentState) -> str:
     """1위~2위 점수 차이로 단독 추천(clear) vs 복수 제시(close)를 결정합니다."""
+    meeting_id = _meeting_id(state)
     candidates = state.get("ranked_candidates") or []
     if len(candidates) >= 2:
         gap = candidates[0].totalScore - candidates[1].totalScore
         route = "clear" if gap >= 10 else "close"
+        next_node = "recommend" if route == "clear" else "negotiate"
         logger.info(
-            "route_after_rank → %s (1위 %.1f, 2위 %.1f, 차이 %.1f)",
-            route,
+            "[meetingId=%s] [5/6 route] NEXT=%s - scoreGap=%.1f, top1=%.1f, top2=%.1f",
+            meeting_id,
+            next_node,
+            gap,
             candidates[0].totalScore,
             candidates[1].totalScore,
-            gap,
         )
         return route
+    logger.info("[meetingId=%s] [5/6 route] NEXT=recommend - 비교 후보 부족", meeting_id)
     return "clear"
